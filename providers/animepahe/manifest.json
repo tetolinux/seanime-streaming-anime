@@ -1,0 +1,9 @@
+{
+  "id": "animepahe-provider",
+  "name": "Animepahe Streaming",
+  "version": "1.0.0",
+  "description": "Scrapes and streams media assets directly from animepahe.ch.",
+  "author": "tetolinux",
+  "type": "anime-provider",
+  "main": "index.ts"
+}
