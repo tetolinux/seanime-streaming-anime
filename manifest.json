@@ -3,7 +3,7 @@
   "name": "Animepahe Streaming",
   "description": "Scrapes and streams media assets directly from animepahe.ch.",
   "manifestURI": "https://raw.githubusercontent.com/tetolinux/seanime-streaming-animepahe/main/provider.ts",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "tetolinux",
   "type": "onlinestream-provider",
   "language": "typescript",
