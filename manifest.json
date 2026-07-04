@@ -1,0 +1,12 @@
+{
+  "id": "animepahe-provider",
+  "name": "Animepahe Streaming",
+  "description": "Scrapes and streams media assets directly from animepahe.ch.",
+  "manifestURI": "https://raw.githubusercontent.com/tetolinux/seanime-streaming-animepahe/main/provider.ts",
+  "version": "1.0.0",
+  "author": "tetolinux",
+  "type": "onlinestream-provider",
+  "language": "typescript",
+  "lang": "en",
+  "payload": "..." 
+}
