@@ -2,21 +2,23 @@
 /// <reference path="./core.d.ts" />
 
 class Provider {
-    api = "https://animepahe.ch";
+    api = "https://aniwaves.ru";
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://animepahe.ch/"
+        "Referer": "https://aniwaves.ru/",
+        "X-Requested-With": "XMLHttpRequest"
     };
 
     getSettings(): Settings {
         return {
-            episodeServers: ["HD 1", "HD 2", "HD 3"],
+            episodeServers: ["VidCloud", "UpCloud", "StreamSB"],
             supportsDub: true
         };
     }
 
     async search(opts: SearchOptions): Promise<SearchResult[]> {
-        const req = await fetch(`${this.api}/?s=${encodeURIComponent(opts.query)}`, {
+        // Aniwaves uses a specific search endpoint that returns HTML fragments
+        const req = await fetch(`${this.api}/ajax/search/suggest?keyword=${encodeURIComponent(opts.query)}`, {
             headers: this.headers
         });
 
@@ -26,20 +28,24 @@ class Provider {
         const $ = LoadDoc(html);
         const results: SearchResult[] = [];
 
-        $(".listupd article.bs").each((_, el) => {
+        // Parse search results from the suggestion dropdown/list
+        $(".nav-item").each((_, el) => {
             const anchor = $(el).find("a");
-            const title = anchor.attr("title") || $(el).find("h2").text();
+            const title = anchor.find(".film-title").text().trim() || anchor.attr("title");
             const url = anchor.attr("href") || "";
             
-            const typeText = $(el).find(".sb").text().toLowerCase();
+            // Determine sub/dub status from badges or text
+            const typeText = $(el).find(".tick-sub, .tick-dub").text().toLowerCase();
             let subOrDub: SubOrDub = "sub";
             if (typeText.includes("dub")) subOrDub = "dub";
-            if (typeText.includes("both")) subOrDub = "both";
+            if (typeText.includes("sub") && typeText.includes("dub")) subOrDub = "both";
 
-            const id = url.replace(this.api, "").replace(/\/$/, "");
+            // Extract ID from URL (usually /watch/{slug}-{id})
+            const idMatch = url.match(/\/watch\/([^?]+)/);
+            const id = idMatch ? idMatch[1] : url.replace(this.api, "");
 
             if (title && id) {
-                results.push({ id, title, url, subOrDub });
+                results.push({ id, title, url: `${this.api}${url}`, subOrDub });
             }
         });
 
@@ -47,101 +53,111 @@ class Provider {
     }
 
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        const targetUrl = id.startsWith("http") ? id : `${this.api}${id}`;
-        const req = await fetch(targetUrl, { headers: this.headers });
+        // Extract anime ID from the full URL or raw ID
+        const animeId = id.includes("-") ? id.split("-").pop() : id;
+        const targetUrl = id.startsWith("http") ? id : `${this.api}/watch/${id}`;
         
-        if (!req.ok) throw new Error("Failed to load episode index mapping details.");
+        // Fetch main page to get initial data and verify existence
+        const req = await fetch(targetUrl, { headers: this.headers });
+        if (!req.ok) throw new Error("Failed to load anime details.");
         
         const html = await req.text();
         const $ = LoadDoc(html);
         const episodes: EpisodeDetails[] = [];
 
-        $(".episodelist ul li").each((_, el) => {
-            const anchor = $(el).find("a");
-            const url = anchor.attr("href") || "";
-            const title = anchor.find("h3").text().trim();
+        // Aniwaves loads episodes via AJAX: /ajax/v2/episode/list/{animeId}
+        const epReq = await fetch(`${this.api}/ajax/v2/episode/list/${animeId}`, {
+            headers: this.headers
+        });
+
+        if (!epReq.ok) throw new Error("Failed to fetch episode list.");
+        
+        const epHtml = await epReq.text();
+        const ep$ = LoadDoc(epHtml);
+
+        // Parse episodes from the AJAX response
+        ep$(".item").each((_, el) => {
+            const link = $(el).find("a");
+            const epNum = parseInt(link.attr("data-number") || "0", 10);
+            const epId = link.attr("data-id") || "";
+            const title = link.attr("title") || `Episode ${epNum}`;
             
-            const infoText = anchor.find(".playinfo span").text(); 
-            const epMatch = infoText.match(/Eps\s*(\d+)/i);
-            const epNumber = epMatch ? parseInt(epMatch[1], 10) : episodes.length + 1;
-
-            const epId = url.replace(this.api, "").replace(/\/$/, "");
-
-            if (epId) {
+            if (epId && epNum > 0) {
                 episodes.push({
-                    id: epId,
-                    number: epNumber,
-                    url,
-                    title: title || `Episode ${epNumber}`
+                    id: epId, // Store episode ID for server fetching
+                    number: epNum,
+                    url: `${this.api}/ajax/v2/episode/servers?episodeId=${epId}`,
+                    title: title
                 });
             }
         });
 
-        return episodes.reverse();
+        return episodes.sort((a, b) => a.number - b.number);
     }
 
     async findEpisodeServer(episode: EpisodeDetails, _server: string): Promise<EpisodeServer> {
-        const targetUrl = episode.id.startsWith("http") ? episode.id : `${this.api}${episode.id}`;
-        const req = await fetch(targetUrl, { headers: this.headers });
+        // Fetch server list for this episode
+        const req = await fetch(episode.url, { headers: this.headers });
+        if (!req.ok) throw new Error("Could not access episode server list.");
 
-        if (!req.ok) throw new Error("Could not access targeted multi-server gateway panel.");
-        
         const html = await req.text();
         const $ = LoadDoc(html);
+        
+        // Map server names to their data attributes
+        let serverBtn: any = null;
+        const serverName = _server === "default" ? "VidCloud" : _server;
+        
+        // Find the button matching the requested server
+        $(".item").each((_, el) => {
+            const btn = $(el);
+            const name = btn.attr("data-type") || btn.text().trim();
+            if (name.toLowerCase().includes(serverName.toLowerCase())) {
+                serverBtn = btn;
+                return false; // break loop
+            }
+        });
 
-        let targetIndex = 0; 
-        if (_server === "HD 2") targetIndex = 1;
-        if (_server === "HD 3") targetIndex = 2;
+        if (!serverBtn) throw new Error(`Server [${_server}] not found for this episode.`);
 
-        const embedTab = $(`.gov-all-host .gov-the-embed[data-index='${targetIndex}']`);
-        if (!embedTab.length) {
-            throw new Error(`Requested video host mirror configuration [${_server}] is unavailable.`);
+        const serverId = serverBtn.attr("data-id");
+        const serverType = serverBtn.attr("data-type"); // 'sub' or 'dub'
+
+        // Fetch actual source links: /ajax/v2/episode/sources?id={serverId}
+        const sourceReq = await fetch(`${this.api}/ajax/v2/episode/sources?id=${serverId}`, {
+            headers: this.headers
+        });
+
+        if (!sourceReq.ok) throw new Error("Failed to fetch video sources.");
+        
+        const sourceData = await sourceReq.json() as { link: string; type?: string };
+        let streamUrl = sourceData.link || "";
+
+        // Handle encrypted links (common on Aniwaves/Zoro clones)
+        if (streamUrl && !streamUrl.startsWith("http")) {
+            try {
+                // Simple decryption for standard Zoro/Aniwaves encryption
+                // Note: Real implementation might need CryptoJS if heavily encrypted
+                const decoded = atob(streamUrl);
+                streamUrl = decoded;
+            } catch (e) {
+                console.warn("Decryption failed, using raw link");
+            }
         }
 
-        const onClickAttr = embedTab.attr("onclick") || "";
-        // Safer regex for JSON embedding: matches content between single quotes
-        const base64Match = onClickAttr.match(/putMi\(\s*this\s*,\s*'([^']+)'\s*\)/);
-
-        if (!base64Match || !base64Match[1]) {
-            throw new Error("Unable to parse inner encrypted server source data strings.");
-        }
-
-        const decodedIframeHtml = atob(base64Match[1]);
-        const iframe$ = LoadDoc(decodedIframeHtml);
-        const videoEmbedUrl = iframe$("iframe").attr("src") || "";
-
-        if (!videoEmbedUrl) {
-            throw new Error("Failed to extract external network stream video source context parameters.");
-        }
-
-        const videoSources: VideoSource[] = [];
-
-        if (videoEmbedUrl.includes("blogger.com")) {
-            videoSources.push({
-                url: videoEmbedUrl,
-                type: "unknown", 
-                quality: "Blogger HD Stream (Default)",
-                subtitles: []
-            });
-        } else if (videoEmbedUrl.includes("ok.ru")) {
-            videoSources.push({
-                url: videoEmbedUrl.startsWith("//") ? `https:${videoEmbedUrl}` : videoEmbedUrl,
-                type: "unknown",
-                quality: "OK.ru Mirror Premium",
-                subtitles: []
-            });
-        } else {
-            videoSources.push({
-                url: videoEmbedUrl,
-                type: videoEmbedUrl.includes(".m3u8") ? "m3u8" : "unknown",
-                quality: "Alternative Direct Feed",
-                subtitles: []
-            });
-        }
+        const videoSources: VideoSource[] = [{
+            url: streamUrl,
+            type: streamUrl.includes(".m3u8") ? "m3u8" : "mp4",
+            quality: "Auto",
+            subtitles: []
+        }];
 
         return {
-            server: _server === "default" ? "HD 1" : _server,
-            headers: { ...this.headers, "Referer": this.api },
+            server: serverName,
+            headers: { 
+                ...this.headers, 
+                "Referer": `${this.api}/`,
+                "Origin": this.api
+            },
             videoSources
         };
     }
