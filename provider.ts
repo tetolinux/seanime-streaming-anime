@@ -2,23 +2,21 @@
 /// <reference path="./core.d.ts" />
 
 class Provider {
-    api = "https://aniwaves.ru";
+    api = "https://gogoanime.by";
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://aniwaves.ru/",
-        "X-Requested-With": "XMLHttpRequest"
+        "Referer": "https://gogoanime.by/"
     };
 
     getSettings(): Settings {
         return {
-            episodeServers: ["VidCloud", "UpCloud", "StreamSB"],
-            supportsDub: true
+            episodeServers: ["Fast Server", "HD"],
+            supportsDub: false // This site appears to be Sub-only based on structure
         };
     }
 
     async search(opts: SearchOptions): Promise<SearchResult[]> {
-        // Aniwaves uses a specific search endpoint that returns HTML fragments
-        const req = await fetch(`${this.api}/ajax/search/suggest?keyword=${encodeURIComponent(opts.query)}`, {
+        const req = await fetch(`${this.api}/?s=${encodeURIComponent(opts.query)}`, {
             headers: this.headers
         });
 
@@ -28,24 +26,22 @@ class Provider {
         const $ = LoadDoc(html);
         const results: SearchResult[] = [];
 
-        // Parse search results from the suggestion dropdown/list
-        $(".nav-item").each((_, el) => {
-            const anchor = $(el).find("a");
-            const title = anchor.find(".film-title").text().trim() || anchor.attr("title");
+        // GogoAnime.by uses standard WordPress post loops for search
+        $(".post-item, article").each((_, el) => {
+            const anchor = $(el).find("a.title, h2 a");
+            const title = anchor.text().trim();
             const url = anchor.attr("href") || "";
             
-            // Determine sub/dub status from badges or text
-            const typeText = $(el).find(".tick-sub, .tick-dub").text().toLowerCase();
+            // Check for sub/dub indicators in badges
+            const typeText = $(el).find(".type, .badge").text().toLowerCase();
             let subOrDub: SubOrDub = "sub";
             if (typeText.includes("dub")) subOrDub = "dub";
-            if (typeText.includes("sub") && typeText.includes("dub")) subOrDub = "both";
 
-            // Extract ID from URL (usually /watch/{slug}-{id})
-            const idMatch = url.match(/\/watch\/([^?]+)/);
-            const id = idMatch ? idMatch[1] : url.replace(this.api, "");
+            // Extract ID from URL slug
+            const id = url.replace(this.api, "").replace(/\/$/, "");
 
             if (title && id) {
-                results.push({ id, title, url: `${this.api}${url}`, subOrDub });
+                results.push({ id, title, url, subOrDub });
             }
         });
 
@@ -53,101 +49,111 @@ class Provider {
     }
 
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
-        // Extract anime ID from the full URL or raw ID
-        const animeId = id.includes("-") ? id.split("-").pop() : id;
-        const targetUrl = id.startsWith("http") ? id : `${this.api}/watch/${id}`;
-        
-        // Fetch main page to get initial data and verify existence
+        const targetUrl = id.startsWith("http") ? id : `${this.api}${id}`;
         const req = await fetch(targetUrl, { headers: this.headers });
+        
         if (!req.ok) throw new Error("Failed to load anime details.");
         
         const html = await req.text();
         const $ = LoadDoc(html);
         const episodes: EpisodeDetails[] = [];
 
-        // Aniwaves loads episodes via AJAX: /ajax/v2/episode/list/{animeId}
-        const epReq = await fetch(`${this.api}/ajax/v2/episode/list/${animeId}`, {
-            headers: this.headers
-        });
-
-        if (!epReq.ok) throw new Error("Failed to fetch episode list.");
-        
-        const epHtml = await epReq.text();
-        const ep$ = LoadDoc(epHtml);
-
-        // Parse episodes from the AJAX response
-        ep$(".item").each((_, el) => {
-            const link = $(el).find("a");
-            const epNum = parseInt(link.attr("data-number") || "0", 10);
-            const epId = link.attr("data-id") || "";
-            const title = link.attr("title") || `Episode ${epNum}`;
+        // Look for episode list in navigation or dedicated episode containers
+        // GogoAnime.by often lists episodes in .naveps or specific episode grids
+        $(".episode-list li, .naveps a, .episodes-grid a").each((_, el) => {
+            const anchor = $(el).find("a") || $(el);
+            const url = anchor.attr("href") || "";
+            const title = anchor.text().trim() || $(el).attr("title");
             
-            if (epId && epNum > 0) {
+            // Extract episode number from title or URL
+            const epMatch = title.match(/Episode\s*(\d+)/i) || url.match(/episode[-_](\d+)/i);
+            const epNumber = epMatch ? parseInt(epMatch[1], 10) : episodes.length + 1;
+            
+            const epId = url.replace(this.api, "").replace(/\/$/, "");
+
+            if (epId) {
                 episodes.push({
-                    id: epId, // Store episode ID for server fetching
-                    number: epNum,
-                    url: `${this.api}/ajax/v2/episode/servers?episodeId=${epId}`,
-                    title: title
+                    id: epId,
+                    number: epNumber,
+                    url,
+                    title: title || `Episode ${epNumber}`
                 });
             }
         });
+
+        // Fallback: If no list found, check if current page IS an episode page
+        if (episodes.length === 0 && html.includes("player-type-link")) {
+            const title = $("h1.entry-title").text().trim();
+            const epMatch = title.match(/Episode\s*(\d+)/i);
+            episodes.push({
+                id: id,
+                number: epMatch ? parseInt(epMatch[1], 10) : 1,
+                url: targetUrl,
+                title: title || "Episode 1"
+            });
+        }
 
         return episodes.sort((a, b) => a.number - b.number);
     }
 
     async findEpisodeServer(episode: EpisodeDetails, _server: string): Promise<EpisodeServer> {
-        // Fetch server list for this episode
-        const req = await fetch(episode.url, { headers: this.headers });
-        if (!req.ok) throw new Error("Could not access episode server list.");
+        const targetUrl = episode.id.startsWith("http") ? episode.id : `${this.api}${episode.id}`;
+        const req = await fetch(targetUrl, { headers: this.headers });
 
+        if (!req.ok) throw new Error("Could not access episode page.");
+        
         const html = await req.text();
         const $ = LoadDoc(html);
-        
-        // Map server names to their data attributes
+
+        // Find the server button matching the requested name
         let serverBtn: any = null;
-        const serverName = _server === "default" ? "VidCloud" : _server;
-        
-        // Find the button matching the requested server
-        $(".item").each((_, el) => {
+        const serverName = _server === "default" ? "Fast Server" : _server;
+
+        $(".player-type-link").each((_, el) => {
             const btn = $(el);
-            const name = btn.attr("data-type") || btn.text().trim();
+            const name = btn.text().trim();
             if (name.toLowerCase().includes(serverName.toLowerCase())) {
                 serverBtn = btn;
-                return false; // break loop
+                return false;
             }
         });
 
-        if (!serverBtn) throw new Error(`Server [${_server}] not found for this episode.`);
+        if (!serverBtn) throw new Error(`Server [${_server}] not found.`);
 
-        const serverId = serverBtn.attr("data-id");
-        const serverType = serverBtn.attr("data-type"); // 'sub' or 'dub'
+        // Extract encrypted data attributes
+        const enc1 = serverBtn.attr("data-encrypted-url1") || "";
+        const enc2 = serverBtn.attr("data-encrypted-url2") || "";
+        const enc3 = serverBtn.attr("data-encrypted-url3") || "";
+        const plainUrl = serverBtn.attr("data-plain-url") || "";
+        const dataType = serverBtn.attr("data-type") || "Blogger";
 
-        // Fetch actual source links: /ajax/v2/episode/sources?id={serverId}
-        const sourceReq = await fetch(`${this.api}/ajax/v2/episode/sources?id=${serverId}`, {
-            headers: this.headers
-        });
+        let streamUrl = "";
 
-        if (!sourceReq.ok) throw new Error("Failed to fetch video sources.");
-        
-        const sourceData = await sourceReq.json() as { link: string; type?: string };
-        let streamUrl = sourceData.link || "";
+        // Handle direct embeds (like 'embed' type which uses megaplay.su)
+        if (dataType === "embed" && plainUrl) {
+            streamUrl = plainUrl;
+        } 
+        // Handle encrypted servers that use 9animetv.be proxy
+        else if (enc1) {
+            // Construct the proxy URL exactly as the site's JS does
+            const params = new URLSearchParams();
+            params.append(dataType, enc1);
+            if (enc2) params.append('url2', enc2);
+            if (enc3) params.append('url3', enc3);
+            params.append('feature_image', '');
+            params.append('user_agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.5 Mobile/15E148 Safari/604.1');
+            params.append('ref', 'gogoanime.by');
+            params.append('postId', '0'); // Default fallback
 
-        // Handle encrypted links (common on Aniwaves/Zoro clones)
-        if (streamUrl && !streamUrl.startsWith("http")) {
-            try {
-                // Simple decryption for standard Zoro/Aniwaves encryption
-                // Note: Real implementation might need CryptoJS if heavily encrypted
-                const decoded = atob(streamUrl);
-                streamUrl = decoded;
-            } catch (e) {
-                console.warn("Decryption failed, using raw link");
-            }
+            streamUrl = `https://9animetv.be/wp-content/plugins/video-player/includes/player/player.php?${params.toString()}`;
         }
+
+        if (!streamUrl) throw new Error("Failed to resolve video source.");
 
         const videoSources: VideoSource[] = [{
             url: streamUrl,
-            type: streamUrl.includes(".m3u8") ? "m3u8" : "mp4",
-            quality: "Auto",
+            type: streamUrl.includes(".m3u8") ? "m3u8" : "unknown",
+            quality: serverName,
             subtitles: []
         }];
 
@@ -155,8 +161,8 @@ class Provider {
             server: serverName,
             headers: { 
                 ...this.headers, 
-                "Referer": `${this.api}/`,
-                "Origin": this.api
+                "Referer": "https://9animetv.be/",
+                "Origin": "https://9animetv.be"
             },
             videoSources
         };
